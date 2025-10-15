@@ -30,9 +30,5 @@
       "src": "/(.*)",
       "dest": "/frontend/$1"
     }
-  ],
-  "env": {
-    "FORCE_CPU": "1",
-    "PYTHONPATH": "$PYTHONPATH:/var/task"
-  }
+  ]
 }
