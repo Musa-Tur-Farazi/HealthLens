@@ -34,10 +34,5 @@
   "env": {
     "FORCE_CPU": "1",
     "PYTHONPATH": "$PYTHONPATH:/var/task"
-  },
-  "functions": {
-    "app.py": {
-      "maxDuration": 60
-    }
   }
 }
