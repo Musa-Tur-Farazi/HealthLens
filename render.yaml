@@ -1,0 +1,64 @@
+# Render.com deployment configuration
+# Optimized for 512MB free tier
+
+services:
+  - type: web
+    name: diseasellm-api
+    env: python
+    region: oregon  # or your preferred region
+    plan: free  # 512MB RAM
+    
+    buildCommand: pip install -r requirements-lite.txt
+    startCommand: python app.py
+    
+    envVars:
+      # Memory optimization - disable heavy features
+      - key: ENABLE_LLM
+        value: "0"  # Disable Phi-3 (saves ~2GB RAM)
+      
+      - key: ENABLE_CLIP
+        value: "0"  # Disable CLIP (saves ~500MB RAM)
+      
+      - key: ENABLE_GRADCAM
+        value: "0"  # Disable GradCAM visualizations
+      
+      - key: FORCE_CPU
+        value: "1"  # Free tier is CPU-only
+      
+      - key: ENABLE_SYMPTOM_PRIOR
+        value: "1"  # Keep text-based symptom matching (lightweight)
+      
+      # Model paths (auto-downloaded from Google Drive)
+      - key: DISEASE_CKPT
+        value: outputs/derm_best.pt
+      
+      - key: XR_CKPT
+        value: outputs/xray_best.pt
+      
+      # Image size optimization (smaller = less memory)
+      - key: DISEASE_IMG_SIZE
+        value: "224"  # Reduced from 384
+      
+      - key: XR_IMG_SIZE
+        value: "224"  # Reduced from 384
+      
+      # Python optimization
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+    
+    healthCheckPath: /health
+    
+    # Autoscaling (free tier doesn't support, but good to have)
+    numInstances: 1
+    
+    # Disk for model caching (free tier: 512MB ephemeral)
+    disk:
+      name: model-cache
+      mountPath: /opt/render/project/src/outputs
+      sizeGB: 1  # Minimum
+
+# Alternative: Use Railway, Fly.io, or Hugging Face Spaces for more RAM
+

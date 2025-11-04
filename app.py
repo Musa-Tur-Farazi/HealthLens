@@ -654,16 +654,19 @@ def _temp_for(name:str) -> float:
     return float(CALIB.get(name, {}).get("T", 1.0))
 
 # ----------------------------
-# LLM (Phi-3 mini) — lazy
+# LLM (Phi-3 mini) — lazy (DISABLED by default for low-memory)
 # ----------------------------
 import threading as _threading
 _llm_lock = _threading.Lock()
 _tok = None
 _llm = None
 LLM_ID = os.environ.get("LLM_ID", "microsoft/Phi-3-mini-4k-instruct")
+ENABLE_LLM = os.environ.get("ENABLE_LLM", "0") == "1"  # Disabled by default
 
 def get_llm():
     global _tok, _llm
+    if not ENABLE_LLM:
+        return None, None
     if _tok is not None and _llm is not None: return _tok, _llm
     with _llm_lock:
         if _tok is not None and _llm is not None: return _tok, _llm
@@ -726,11 +729,13 @@ def chat_completion(messages, max_new_tokens=128, temperature=0.2, top_p=0.95):
 
 # ----------------------------
 # CLIP hinting (xray / skin / microscopy / CT-MRI / everyday)
+# DISABLED by default for low-memory deployments
 # ----------------------------
 _CLIP_MODEL = None
 _CLIP_PROC  = None
 _CLIP_LOCK  = _threading.Lock()
 CLIP_ID = os.environ.get("CLIP_ID", "openai/clip-vit-base-patch32")
+ENABLE_CLIP = os.environ.get("ENABLE_CLIP", "0") == "1"  # Disabled by default
 CLIP_LABELS = [
     ("clinical_skin", "a close-up clinical skin photograph"),
     ("microscopy",    "a histopathology microscopy slide of tissue"),
@@ -741,6 +746,8 @@ CLIP_LABELS = [
 
 def get_clip():
     global _CLIP_MODEL, _CLIP_PROC
+    if not ENABLE_CLIP:
+        return None, None
     if _CLIP_MODEL is not None: return _CLIP_MODEL, _CLIP_PROC
     with _CLIP_LOCK:
         if _CLIP_MODEL is not None: return _CLIP_MODEL, _CLIP_PROC
@@ -755,6 +762,8 @@ def get_clip():
 
 @torch.no_grad()
 def clip_scores(img: Image.Image) -> Dict[str, float]:
+    if not ENABLE_CLIP:
+        return {}
     model, proc = get_clip()
     if model is None:
         return {}
@@ -803,7 +812,11 @@ def infer_one(model: nn.Module, tfms, labels: List[str], img: Image.Image, k: in
     topk = [(labels[i], float(probs[i])) for i in idx]
     return topk, probs, {"p0": p0, "gap": gap, "tta_std": tta_std, "entropy": entropy}
 
+ENABLE_GRADCAM = os.environ.get("ENABLE_GRADCAM", "0") == "1"  # Disabled by default
+
 def make_cam_b64(model, img: Image.Image, tfms, target_index=None):
+    if not ENABLE_GRADCAM:
+        return None
     try:
         from pytorch_grad_cam import GradCAM
         from pytorch_grad_cam.utils.image import show_cam_on_image

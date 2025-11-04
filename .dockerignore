@@ -1,0 +1,57 @@
+# Don't copy these to Docker image
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Node.js (frontend)
+node_modules/
+frontend/
+
+# Test files
+test_downloads/
+*.tmp
+
+# Documentation
+*.md
+!README.md
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+ENV/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files (download at runtime via gdrive_config)
+# outputs/*.pt
+# outputs/*.json
+
