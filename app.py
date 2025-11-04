@@ -1143,6 +1143,7 @@ app.add_middleware(
 )
 
 @app.get("/")
+@app.head("/")
 def root():
     return {
         "status": "ok",
@@ -1256,4 +1257,6 @@ def diag(req: DiagRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting server on 0.0.0.0:{port}")
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

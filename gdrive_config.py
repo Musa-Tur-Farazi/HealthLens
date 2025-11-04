@@ -5,10 +5,16 @@ No API key required - just public share links!
 """
 
 import os
-import requests
 import json
 from pathlib import Path
 from typing import Dict, Optional
+
+try:
+    import gdown
+    GDOWN_AVAILABLE = True
+except ImportError:
+    GDOWN_AVAILABLE = False
+    import requests
 
 # Model file mappings - Update these with your actual Google Drive direct download URLs
 MODEL_FILES = {
@@ -21,10 +27,10 @@ MODEL_FILES = {
 
 def download_file_from_google_drive(download_url: str, local_path: str, expected_size: Optional[int] = None) -> bool:
     """
-    Download a file from Google Drive using direct URL.
+    Download a file from Google Drive using gdown (preferred) or requests fallback.
     
     Args:
-        download_url: Direct Google Drive download URL
+        download_url: Direct Google Drive download URL or sharing link
         local_path: Local path to save the file
         expected_size: Expected file size for validation (optional)
     
@@ -35,21 +41,76 @@ def download_file_from_google_drive(download_url: str, local_path: str, expected
         print(f"Downloading from Google Drive...")
         print(f"URL: {download_url}")
         
+        # Create directory if it doesn't exist
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        # Try gdown first (more reliable for Google Drive)
+        if GDOWN_AVAILABLE:
+            print("Using gdown for reliable Google Drive download...")
+            try:
+                gdown.download(download_url, local_path, quiet=False, fuzzy=True)
+                
+                # Validate the downloaded file
+                if not os.path.exists(local_path):
+                    print(f"❌ Download failed - file not created")
+                    return False
+                
+                file_size = os.path.getsize(local_path)
+                print(f"✅ Downloaded {local_path} ({file_size} bytes)")
+                
+                # Check if file is HTML (failed download)
+                with open(local_path, 'rb') as f:
+                    first_byte = f.read(1)
+                    if first_byte == b'<':
+                        print(f"❌ Error: Downloaded file is HTML, not a valid model file.")
+                        print(f"   Make sure the Google Drive file has 'Anyone with the link' sharing enabled.")
+                        os.remove(local_path)
+                        return False
+                
+                return True
+            except Exception as e:
+                print(f"gdown failed: {e}, falling back to requests...")
+        
+        # Fallback to requests method
+        import requests
+        
+        # Convert view/sharing URLs to direct download format
+        if "/file/d/" in download_url and "/view" in download_url:
+            import re
+            match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', download_url)
+            if match:
+                file_id = match.group(1)
+                download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                print(f"Converted to direct download URL: {download_url}")
+        
         # Handle Google Drive's virus scan warning for large files
         session = requests.Session()
         
         # First request to get the actual download URL (for large files)
-        response = session.get(download_url, stream=True)
+        response = session.get(download_url, stream=True, allow_redirects=True)
         
-        # If it's a virus scan warning page, extract the real download URL
-        if "virus scan warning" in response.text.lower() or "download anyway" in response.text.lower():
-            # Extract the real download URL from the page
+        # Check if we got HTML instead of the file (common for large files)
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' in content_type or response.content[:1] == b'<':
+            # Extract confirmation token for large files
             import re
-            match = re.search(r'href="(/uc\?export=download[^"]+)"', response.text)
+            content_str = response.content.decode('utf-8', errors='ignore')
+            
+            # Look for the confirmation form
+            match = re.search(r'action="([^"]+)"', content_str)
             if match:
-                real_url = "https://drive.google.com" + match.group(1)
-                print("Large file detected, getting real download URL...")
-                response = session.get(real_url, stream=True)
+                confirm_url = match.group(1).replace('&amp;', '&')
+                if not confirm_url.startswith('http'):
+                    confirm_url = "https://drive.google.com" + confirm_url
+                print("Large file detected, confirming download...")
+                response = session.get(confirm_url, stream=True, allow_redirects=True)
+            else:
+                # Try the confirm parameter approach
+                if 'id=' in download_url:
+                    file_id = download_url.split('id=')[1].split('&')[0]
+                    confirm_url = f"https://drive.google.com/uc?export=download&confirm=t&id={file_id}"
+                    print("Trying with confirm parameter...")
+                    response = session.get(confirm_url, stream=True, allow_redirects=True)
         
         response.raise_for_status()
         
@@ -59,10 +120,19 @@ def download_file_from_google_drive(download_url: str, local_path: str, expected
         # Download with progress
         total_size = int(response.headers.get('content-length', 0))
         downloaded = 0
+        first_chunk = True
         
         with open(local_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
+                    # Validate first chunk is not HTML
+                    if first_chunk:
+                        if chunk[:1] == b'<':
+                            print(f"\n❌ Error: Received HTML instead of file. Check sharing permissions.")
+                            print(f"   First bytes: {chunk[:100]}")
+                            return False
+                        first_chunk = False
+                    
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total_size > 0:
@@ -70,6 +140,14 @@ def download_file_from_google_drive(download_url: str, local_path: str, expected
                         print(f"\rProgress: {progress:.1f}%", end="", flush=True)
         
         print(f"\nDownloaded {local_path} ({downloaded} bytes)")
+        
+        # Final validation - check file is not HTML
+        with open(local_path, 'rb') as f:
+            first_byte = f.read(1)
+            if first_byte == b'<':
+                print(f"❌ Error: Downloaded file is HTML, not a valid model file.")
+                os.remove(local_path)
+                return False
         
         # Validate file size if expected size provided
         if expected_size and downloaded != expected_size:
