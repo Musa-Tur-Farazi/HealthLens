@@ -558,8 +558,8 @@ def load_ckpt_any(ckpt_path: str, classes_json: str, model_name_hint: str, defau
 DISEASE = {
     "name": "disease",
     "model_name": os.environ.get("DISEASE_MODEL", "tf_efficientnetv2_s"),  # hint only now
-    "ckpt":       os.environ.get("DISEASE_CKPT", "outputs/derm_best.pt"),
-    "classes":    os.environ.get("DISEASE_CLASSES", "outputs/derm_classes.json"),
+    "ckpt":       os.environ.get("DISEASE_CKPT", "outputs/best.pt"),
+    "classes":    os.environ.get("DISEASE_CLASSES", "outputs/classes.json"),
 }
 XRAY = {
     "name": "xray",
@@ -580,14 +580,10 @@ def _first_existing(candidates):
 
 if "DISEASE_CKPT" not in os.environ:
     DISEASE["ckpt"] = _first_existing([
-        "outputs/derm_best.pt",
-        "outputs/melanoma_best.pt",
         "outputs/best.pt",
     ])
 if "DISEASE_CLASSES" not in os.environ:
     DISEASE["classes"] = _first_existing([
-        "outputs/derm_classes.json",
-        "outputs/mel_classes.json",
         "outputs/classes.json",
     ])
 if "XR_CKPT" not in os.environ:
