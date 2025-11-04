@@ -466,7 +466,52 @@ def _timm_add_backbone_prefix_if_needed(state: Dict[str, torch.Tensor]) -> Dict[
 # Robust checkpoint loader (auto-architecture)
 # ----------------------------
 def load_ckpt_any(ckpt_path: str, classes_json: str, model_name_hint: str, default_tfms: T.Compose) -> Tuple[nn.Module, List[str], T.Compose]:
+    # Allow URL-based resources by downloading locally first (idempotent)
+    def _resolve_local_resource(path_or_url: str, dest_dir: str = "outputs") -> str:
+        try:
+            s = str(path_or_url)
+        except Exception:
+            return path_or_url
+        if s.lower().startswith(("http://", "https://")):
+            try:
+                import hashlib, requests
+                Path(dest_dir).mkdir(parents=True, exist_ok=True)
+                base = s.split("?", 1)[0]
+                ext = ".pt" if base.endswith(".pt") else (".json" if base.endswith(".json") else "")
+                fname = "download_" + hashlib.sha1(s.encode("utf-8")).hexdigest() + ext
+                dest = str(Path(dest_dir) / fname)
+                if not Path(dest).exists() or Path(dest).stat().st_size == 0:
+                    with requests.get(s, stream=True, timeout=60) as r:
+                        r.raise_for_status()
+                        with open(dest, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                return dest
+            except Exception as e:
+                print(f"Warning: failed to download resource '{s}' → {e}")
+                return s
+        return s
+
+    classes_json = _resolve_local_resource(classes_json)
     classes = _load_classes_list(classes_json)
+    # Resolve remote URLs to local files and add basic sanity checks
+    ckpt_path = _resolve_local_resource(ckpt_path)
+    p = Path(ckpt_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    # Detect common failure where file is actually HTML (e.g., failed download)
+    try:
+        with open(p, "rb") as fh:
+            b = fh.read(1)
+        if b == b"<":
+            raise RuntimeError(
+                "Checkpoint looks like HTML ('<' first byte). Likely a failed/unauthorized URL download. "
+                "Provide a valid local .pt file or a direct-download URL via DISEASE_CKPT/XR_CKPT."
+            )
+    except Exception:
+        pass
+
     # Handle torch 2.6+ weights_only change
     try:
         sd = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
@@ -513,8 +558,8 @@ def load_ckpt_any(ckpt_path: str, classes_json: str, model_name_hint: str, defau
 DISEASE = {
     "name": "disease",
     "model_name": os.environ.get("DISEASE_MODEL", "tf_efficientnetv2_s"),  # hint only now
-    "ckpt":       os.environ.get("DISEASE_CKPT", "outputs/best.pt"),
-    "classes":    os.environ.get("DISEASE_CLASSES", "outputs/classes.json"),
+    "ckpt":       os.environ.get("DISEASE_CKPT", "outputs/derm_best.pt"),
+    "classes":    os.environ.get("DISEASE_CLASSES", "outputs/derm_classes.json"),
 }
 XRAY = {
     "name": "xray",
@@ -522,6 +567,33 @@ XRAY = {
     "ckpt":       os.environ.get("XR_CKPT", "outputs/xray_best.pt"),
     "classes":    os.environ.get("XR_CLASSES", "outputs/xray_classes.json"),
 }
+
+# Prefer first existing local path when env not explicitly set
+def _first_existing(candidates):
+    for p in candidates:
+        try:
+            if Path(p).exists():
+                return p
+        except Exception:
+            pass
+    return candidates[0]
+
+if "DISEASE_CKPT" not in os.environ:
+    DISEASE["ckpt"] = _first_existing([
+        "outputs/derm_best.pt",
+        "outputs/melanoma_best.pt",
+        "outputs/best.pt",
+    ])
+if "DISEASE_CLASSES" not in os.environ:
+    DISEASE["classes"] = _first_existing([
+        "outputs/derm_classes.json",
+        "outputs/mel_classes.json",
+        "outputs/classes.json",
+    ])
+if "XR_CKPT" not in os.environ:
+    XRAY["ckpt"] = _first_existing(["outputs/xray_best.pt"])  # keep as-is
+if "XR_CLASSES" not in os.environ:
+    XRAY["classes"] = _first_existing(["outputs/xray_classes.json"])  # keep as-is
 
 # ----------------------------
 # Ensure models are downloaded from Google Drive
@@ -1069,6 +1141,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "name": "HealthLens",
+        "version": app.version,
+        "endpoints": {"health": "/health", "diag": "/v1/diag"},
+    }
 
 @app.get("/health")
 def health():
