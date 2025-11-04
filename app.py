@@ -758,6 +758,146 @@ def make_cam_b64(model, img: Image.Image, tfms, target_index=None):
     except Exception as e:
         print(f"Grad-CAM failed: {e}")
         return None
+    
+# ----------------------------
+# Symptom prior (text-guided reweighting)
+# ----------------------------
+import re as _re
+
+_ENABLE_SYMPTOM_PRIOR = os.environ.get("ENABLE_SYMPTOM_PRIOR", "1") == "1"
+_SYMPTOM_PRIOR_STRENGTH = float(os.environ.get("SYMPTOM_PRIOR_STRENGTH", "0.6"))  # 0..1
+_USE_LLM_PRIOR = os.environ.get("USE_LLM_PRIOR", "0") == "1"  # optional, off by default
+
+_STOPWORDS = set([
+    "a","an","the","and","or","but","if","on","in","at","to","for","of","with","without",
+    "is","are","was","were","be","been","being","it","this","that","these","those","as","by",
+    "from","than","then","too","very","so","not","no","have","has","had","i","we","you","they",
+    "he","she","my","your","our","their","his","her","them","me","us","patient","pt","hx","h/o"
+])
+
+def _tokenize_symptoms(text: str) -> list:
+    try:
+        t = text.lower()
+        toks = _re.split(r"[^a-z0-9\+/]+", t)
+        toks = [w for w in toks if w and w not in _STOPWORDS and len(w) >= 3]
+        return toks[:64]
+    except Exception:
+        return []
+
+def _label_hint_blob(label: str, modality: str) -> dict:
+    table = XRAY_HINTS if modality == "xray" else DISEASE_HINTS
+    info = table.get(label, {})
+    if not isinstance(info, dict):
+        info = {}
+    return {
+        "label": label,
+        "aka": " ".join(info.get("aka", [])).lower(),
+        "visual": " ".join(info.get("visual", [])).lower(),
+        "summary": str(info.get("summary", "")).lower(),
+        "red_flags": " ".join(info.get("red_flags", [])).lower(),
+    }
+
+def _simple_symptom_prior(symptoms: str, labels: list, modality: str) -> tuple:
+    toks = _tokenize_symptoms(symptoms)
+    if not toks:
+        import numpy as _np
+        return _np.zeros(len(labels), dtype="float32"), {
+            "tokens": [],
+            "top": []
+        }
+    weights = {"aka": 2.0, "visual": 1.5, "summary": 1.0, "red_flags": 1.0, "label": 1.0}
+    scores = []
+    details = []
+    for lbl in labels:
+        blob = _label_hint_blob(lbl, modality)
+        score = 0.0
+        fields = {
+            "aka": blob["aka"],
+            "visual": blob["visual"],
+            "summary": blob["summary"],
+            "red_flags": blob["red_flags"],
+            "label": blob["label"].lower(),
+        }
+        for tok in toks:
+            for fname, text in fields.items():
+                if not text:
+                    continue
+                # substring containment to tolerate morphology (e.g., erythema -> erythem-)
+                if tok in text:
+                    score += weights[fname]
+        scores.append(score)
+        details.append((lbl, score))
+
+    import numpy as _np
+    arr = _np.asarray(scores, dtype="float32")
+    # Normalize to a probability-like prior if non-zero
+    pri = arr.copy()
+    pri = pri / (pri.sum() + 1e-8)
+    details.sort(key=lambda x: x[1], reverse=True)
+    return pri, {"tokens": toks, "top": details[:8]}
+
+def _llm_symptom_prior(symptoms: str, labels: list, modality: str) -> tuple:
+    # Optional: use local/free LLM to suggest label scores from symptoms
+    # Returns (prior_array, debug) — zeros if LLM unavailable or fails
+    import numpy as _np
+    if not _USE_LLM_PRIOR or not symptoms:
+        return _np.zeros(len(labels), dtype="float32"), {"used": False}
+    try:
+        instruction = (
+            "Given a list of condition labels and patient-reported symptoms, "
+            "select up to 8 labels that best match the symptoms. "
+            "Return strictly JSON as an array of objects: [{\"label\": str, \"score\": number between 0 and 1}]. "
+            "Scores should sum roughly to 1. Use only labels from the provided list."
+        )
+        user = json.dumps({
+            "modality": modality,
+            "labels": labels,
+            "symptoms": symptoms,
+        }, ensure_ascii=False)
+        out = chat_completion([
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": user},
+        ], max_new_tokens=200, temperature=0.1, top_p=0.9)
+        raw = out[out.find("["): out.rfind("]") + 1]
+        items = json.loads(raw)
+        vec = _np.zeros(len(labels), dtype="float32")
+        used = []
+        for it in items:
+            lab = str(it.get("label", ""))
+            sc = float(it.get("score", 0.0))
+            try:
+                idx = labels.index(lab)
+            except ValueError:
+                # try case-insensitive exact match
+                idx = next((i for i, L in enumerate(labels) if L.lower() == lab.lower()), -1)
+            if idx >= 0 and sc > 0:
+                vec[idx] += sc
+                used.append((labels[idx], sc))
+        s = float(vec.sum())
+        if s > 0:
+            vec /= s
+        used.sort(key=lambda x: x[1], reverse=True)
+        return vec, {"used": True, "top": used[:8]}
+    except Exception as e:
+        print(f"LLM prior failed: {e}")
+        return _np.zeros(len(labels), dtype="float32"), {"used": False, "error": str(e)}
+
+def _fuse_probs_with_prior(image_probs, prior, strength: float):
+    # multiplicative fusion: p*prior^alpha then renormalize
+    import numpy as _np
+    p = _np.asarray(image_probs, dtype="float32")
+    q = _np.asarray(prior, dtype="float32")
+    if p.shape != q.shape:
+        return p
+    if not _np.isfinite(q).any() or q.sum() <= 0:
+        return p
+    q = q / (q.sum() + 1e-8)
+    q = _np.clip(q, 1e-8, 1.0)
+    fused = p * (q ** float(max(0.0, min(1.0, strength))))
+    s = float(fused.sum())
+    if s <= 0:
+        return p
+    return fused / s
 # def _derm_hints_for(label_lower: str) -> list:
 #     H = []
 #     L = label_lower
@@ -966,7 +1106,38 @@ def diag(req: DiagRequest):
     temp   = _temp_for(req.modality)
 
     topk, probs, stats = infer_one(model, tfms, labels, img, req.topk, tta=True, temp=temp)
-    out = [{"label": l, "prob": p, "source": req.modality} for (l, p) in topk]
+
+    # Symptom-guided fusion: reweight image probabilities using text-derived prior
+    fusion_info = {"enabled": False}
+    if _ENABLE_SYMPTOM_PRIOR and (req.symptoms or "").strip():
+        try:
+            prior_simple, debug_simple = _simple_symptom_prior(req.symptoms, labels, req.modality)
+            prior = prior_simple
+            debug = {"simple": debug_simple}
+            if _USE_LLM_PRIOR:
+                prior_llm, debug_llm = _llm_symptom_prior(req.symptoms, labels, req.modality)
+                if prior_llm.sum() > 0:
+                    import numpy as _np
+                    # Merge priors (average)
+                    prior = (prior + prior_llm) / 2.0
+                debug["llm"] = debug_llm
+            fused_probs = _fuse_probs_with_prior(probs, prior, _SYMPTOM_PRIOR_STRENGTH)
+            if fused_probs is not None:
+                probs = fused_probs
+                fusion_info = {
+                    "enabled": True,
+                    "strength": _SYMPTOM_PRIOR_STRENGTH,
+                    "tokens": debug.get("simple", {}).get("tokens", []),
+                    "prior_top": debug.get("simple", {}).get("top", []),
+                    "llm": debug.get("llm", {}),
+                }
+        except Exception as e:
+            fusion_info = {"enabled": False, "error": str(e)}
+
+    # Build final top-k from (possibly) fused probabilities
+    import numpy as _np
+    idx_sorted = _np.argsort(probs)[::-1][:req.topk]
+    out = [{"label": labels[i], "prob": float(probs[i]), "source": (req.modality + "+symptom" if fusion_info.get("enabled") else req.modality)} for i in idx_sorted]
 
     uncertain = (stats["p0"] < 0.60) or (stats["gap"] < 0.12) or (stats["tta_std"] > 0.08) or (stats["entropy"] > 1.20)
 
@@ -986,7 +1157,7 @@ def diag(req: DiagRequest):
         "modality": req.modality, "labels": labels, "topk": out,
         "uncertain": bool(uncertain or needs_confirmation),
         "symptoms": (req.symptoms or "").strip(),
-        "router": {"clip": clip_s, "stats": stats},
+        "router": {"clip": clip_s, "stats": stats, "symptom_prior": fusion_info},
     }
 
     report  = llm_report(payload)
